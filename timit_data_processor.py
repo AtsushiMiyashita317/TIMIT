@@ -58,7 +58,7 @@ class Timit(Dataset):
                 end = df_phn.iat[i,1]
                 phn = df_phn.iat[i,2]
                 self.cache_label[i] = self.phn_dict[phn]
-                self.cache_centor[i] = (begin + end)//2
+                self.cache_centor[i] = (begin + end)//self.n_fft
 
             if self.transform1:
                 self.cache_spec = self.transform1(self.cache_spec)    
