@@ -51,7 +51,10 @@ class Timit(Dataset):
             if self.signal_transform:
                 sign = self.signal_transform(sign)    
 
-            self.cache_spec = signal.stft(sign,sr,nperseg=self.n_fft)[2]
+            self.cache_spec = np.abs(signal.stft(sign,sr,nperseg=self.n_fft)[2])
+
+            if self.spec_transform:
+                self.cache_spec = self.spec_transform(self.cache_spec)    
 
             phn_path = os.path.join(self.data_dir, cand.iat[0, 2])
             df_phn = pd.read_csv(phn_path, delimiter=' ', header=None)
@@ -65,8 +68,7 @@ class Timit(Dataset):
                 self.cache_label[i] = self.phn_dict[phn]
                 self.cache_centor[i] = (begin + end)//self.n_fft
 
-            if self.spec_transform:
-                self.cache_spec = self.spec_transform(self.cache_spec)    
+            
 
             self.cache_range = (cand.iat[0, 5],cand.iat[0, 4])
         
