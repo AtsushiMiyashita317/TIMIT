@@ -49,7 +49,7 @@ class Timit(Dataset):
             wav_path = os.path.join(self.data_dir, cand.iat[0, 1])
             sign, sr = sf.read(wav_path)
             if self.signal_transform:
-                self.cache_spec = self.signal_transform(self.cache_spec)    
+                sign = self.signal_transform(sign)    
 
             self.cache_spec = signal.stft(sign,sr,nperseg=self.n_fft)[2]
 
