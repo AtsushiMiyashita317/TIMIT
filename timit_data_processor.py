@@ -15,7 +15,8 @@ phn_count = 0
 
 class Timit(Dataset):
     def __init__(self, root, annotations_file, phncode_file, data_dir, 
-                n_fft=256, n_frame=15, transform1=None, transform2=None, target_transform=None, datasize=None):
+                n_fft=256, n_frame=15, signal_transform=None, spec_transform=None, 
+                frame_transform=None, target_transform=None, datasize=None):
 
         self.annotations = pd.read_csv(annotations_file)
 
@@ -25,8 +26,9 @@ class Timit(Dataset):
         self.data_dir = os.path.join(root, data_dir)
         self.n_fft = n_fft
         self.n_frame = n_frame
-        self.transform1 = transform1
-        self.transform2 = transform2
+        self.signal_transform = signal_transform
+        self.spec_transform = spec_transform
+        self.frame_transform = frame_transform
         self.target_transform = target_transform
         self.cache_spec = None
         self.cache_label = None
@@ -46,6 +48,9 @@ class Timit(Dataset):
             
             wav_path = os.path.join(self.data_dir, cand.iat[0, 1])
             sign, sr = sf.read(wav_path)
+            if self.signal_transform:
+                self.cache_spec = self.signal_transform(self.cache_spec)    
+
             self.cache_spec = signal.stft(sign,sr,nperseg=self.n_fft)[2]
 
             phn_path = os.path.join(self.data_dir, cand.iat[0, 2])
@@ -60,8 +65,8 @@ class Timit(Dataset):
                 self.cache_label[i] = self.phn_dict[phn]
                 self.cache_centor[i] = (begin + end)//self.n_fft
 
-            if self.transform1:
-                self.cache_spec = self.transform1(self.cache_spec)    
+            if self.spec_transform:
+                self.cache_spec = self.spec_transform(self.cache_spec)    
 
             self.cache_range = (cand.iat[0, 5],cand.iat[0, 4])
         
@@ -78,8 +83,8 @@ class Timit(Dataset):
         frames[...,lower_dst:upper_dst] = self.cache_spec[...,lower_sc:upper_sc]
         label = self.cache_label[...,local_idx]
 
-        if self.transform2:
-            frames = self.transform2(frames)
+        if self.frame_transform:
+            frames = self.frame_transform(frames)
         if self.target_transform:
             label = self.target_transform(label)
 
