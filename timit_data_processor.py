@@ -3,16 +3,19 @@ import os
 import pickle
 
 import numpy as np
+from numpy.ma import indices
 import pandas as pd
 import soundfile as sf
 from scipy import signal
-from torch.utils.data import Dataset, DataLoader
+import torch
+from torch.utils.data import Dataset, DataLoader, Sampler
 
 
 class Timit(Dataset):
     def __init__(self, root, annotations_file, phncode_file, data_dir, 
-                nperseg=256, norverlap=None, nframe=15, signal_transform=None, spec_transform=None, 
-                frame_transform=None, target_transform=None, datasize=None):
+                 nperseg=256, norverlap=None, nframe=15, 
+                 signal_transform=None, spec_transform=None, frame_transform=None, target_transform=None, 
+                 datasize=None, cachesize = 10):
 
         self.data_dir = os.path.join(root, data_dir)
         self.nperseg = nperseg
@@ -21,13 +24,18 @@ class Timit(Dataset):
         else:
             self.noverlap = nperseg//2
         self.nframe = nframe
+
         self.signal_transform = signal_transform
         self.spec_transform = spec_transform
         self.frame_transform = frame_transform
         self.target_transform = target_transform
-        self.cache_spec = None
-        self.cache_label = None
-        self.cache_range = (0,0)
+
+        self.cachesize = cachesize
+        self.cache_spec = [np.empty(0)] * self.cachesize
+        self.cache_label = [np.empty(0)] * self.cachesize
+        self.cache_range = [(0,0)] * self.cachesize
+        self.cache_oldest = 0
+
         self.datasize = datasize
 
         self.annotations = pd.read_csv(annotations_file)
@@ -52,7 +60,12 @@ class Timit(Dataset):
             return self.annotations['maxidx'].max()
 
     def __getitem__(self, idx):
-        if not (self.cache_range[0]<=idx and idx<self.cache_range[1]):
+        hit = -1
+        for i in range(self.cachesize):
+            if self.cache_range[0]<=idx and idx<self.cache_range[1]:
+                hit = i
+                break
+        if hit < 0:
             cand = self.annotations[self.annotations['maxidx']>idx]
             
             wav_path = os.path.join(self.data_dir, cand.iat[0, 1])
@@ -60,26 +73,29 @@ class Timit(Dataset):
             if self.signal_transform:
                 sign = self.signal_transform(sign)    
 
-            self.cache_spec = np.abs(signal.stft(sign,sr,nperseg=self.nperseg,noverlap=self.noverlap)[2])
+            self.cache_spec[self.cache_oldest] = np.abs(signal.stft(sign,sr,nperseg=self.nperseg,noverlap=self.noverlap)[2])
 
             if self.spec_transform:
                 self.cache_spec = self.spec_transform(self.cache_spec)    
 
             phn_path = os.path.join(self.data_dir, cand.iat[0, 2])
             df_phn = pd.read_csv(phn_path, delimiter=' ', header=None)
-            self.cache_label = np.zeros(self.cache_spec.shape[-1], dtype=np.int64)
+            self.cache_label[self.cache_oldest] = np.zeros(self.cache_spec.shape[-1], dtype=np.int64)
 
             for i in range(len(df_phn)):
                 phn = df_phn.iat[i,2]
                 begin = df_phn.iat[i,0]//(self.nperseg - self.noverlap)
                 end = df_phn.iat[i,1]//(self.nperseg - self.noverlap)
-                self.cache_label[begin:end] = self.phn_dict[phn]       
+                self.cache_label[self.cache_oldest][begin:end] = self.phn_dict[phn]       
 
-            self.cache_range = (cand.iat[0, 4],cand.iat[0, 5])
-        
-        local_idx = idx - self.cache_range[0]
-        frames = self.cache_spec[...,local_idx:local_idx + self.nframe]
-        label = self.cache_label[local_idx + self.nframe//2]
+            self.cache_range[self.cache_oldest] = (cand.iat[0, 4],cand.iat[0, 5])
+
+            hit = self.cache_oldest
+            self.cache_oldest = (self.cache_oldest + 1) % self.cachesize
+
+        local_idx = idx - self.cache_range[hit][0]
+        frames = self.cache_spec[hit][...,local_idx:local_idx + self.nframe]
+        label = self.cache_label[hit][local_idx + self.nframe//2]
 
         if self.frame_transform:
             frames = self.frame_transform(frames)
@@ -168,6 +184,29 @@ class TimitRow(Dataset):
                     
         return sign,labels
 
+class RandomFrameSamplar(Sampler):
+    def __init__(self, maxidx, batchsize, cachesize):
+        self.maxidx = maxidx
+        self.minidx = np.zeros_like(maxidx, dtype=np.int64)
+        self.minidx[1:] = maxidx[:-1]
+        self.datasize = np.max(maxidx)
+        self.rng = np.random.default_rng()
+        
+        self.cachesize = cachesize
+        self.count = 0
+        self.batchsize = batchsize
+
+    def __iter__(self):
+        rng_idx = self.rng.shuffle(np.arange(self.maxidx.size))
+        self.maxidx = self.maxidx[rng_idx]
+        self.minidx = self.minidx[rng_idx]
+        for i in range(self.maxidx.size//self.cachesize):
+            arrs = [np.arange(self.minidx[i*self.cachesize+j],self.maxidx[i*self.cachesize+j]) for j in range(self.batchsize)]
+            indices = self.rng.shuffle(np.concatenate([arrs]))
+            yield indices
+
+    def __len__(self):
+        return self.maxidx.size//self.cachesize
 
 def main():
     parser = argparse.ArgumentParser(description="test class FramedTimit")
