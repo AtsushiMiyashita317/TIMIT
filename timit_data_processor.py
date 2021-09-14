@@ -9,23 +9,18 @@ from scipy import signal
 from torch.utils.data import Dataset, DataLoader
 
 
-phn_dict = {}
-phn_list = []
-phn_count = 0
-
 class Timit(Dataset):
     def __init__(self, root, annotations_file, phncode_file, data_dir, 
-                n_fft=256, n_frame=15, signal_transform=None, spec_transform=None, 
+                nperseg=256, norverlap=None, nframe=15, signal_transform=None, spec_transform=None, 
                 frame_transform=None, target_transform=None, datasize=None):
 
-        self.annotations = pd.read_csv(annotations_file)
-
-        with open(phncode_file,'rb') as f:
-            self.phn_dict,self.phn_list,self.phn_count = pickle.load(f)
-        
         self.data_dir = os.path.join(root, data_dir)
-        self.n_fft = n_fft
-        self.n_frame = n_frame
+        self.nperseg = nperseg
+        if norverlap:
+            self.noverlap = norverlap
+        else:
+            self.noverlap = nperseg//2
+        self.nframe = nframe
         self.signal_transform = signal_transform
         self.spec_transform = spec_transform
         self.frame_transform = frame_transform
@@ -33,8 +28,22 @@ class Timit(Dataset):
         self.cache_spec = None
         self.cache_label = None
         self.cache_range = (0,0)
-        self.cache_centor = None
         self.datasize = datasize
+
+        self.annotations = pd.read_csv(annotations_file)
+
+        sign_length = self.annotations['length'].values
+        spec_length = (sign_length+self.nperseg-self.noverlap-1)//(self.nperseg-self.noverlap) + 1
+        item_length = spec_length - self.nframe + 1
+        maxidx = np.cumsum(item_length)
+        minidx = np.zeros_like(maxidx, dtype=np.int64)
+        minidx[1:] = maxidx[:-1]
+        self.annotations['minidx'] = minidx
+        self.annotations['maxidx'] = maxidx
+
+        with open(phncode_file,'rb') as f:
+            self.phn_dict,self.phn_list,self.phn_count = pickle.load(f)
+        
 
     def __len__(self):
         if self.datasize:
@@ -51,39 +60,26 @@ class Timit(Dataset):
             if self.signal_transform:
                 sign = self.signal_transform(sign)    
 
-            self.cache_spec = np.abs(signal.stft(sign,sr,nperseg=self.n_fft)[2])
+            self.cache_spec = np.abs(signal.stft(sign,sr,nperseg=self.nperseg,noverlap=self.noverlap)[2])
 
             if self.spec_transform:
                 self.cache_spec = self.spec_transform(self.cache_spec)    
 
             phn_path = os.path.join(self.data_dir, cand.iat[0, 2])
             df_phn = pd.read_csv(phn_path, delimiter=' ', header=None)
-            self.cache_label = np.zeros(len(df_phn), dtype=np.int64)
-            self.cache_centor = np.zeros(len(df_phn), dtype=np.int64)
+            self.cache_label = np.zeros(self.cache_spec.shape[-1], dtype=np.int64)
 
             for i in range(len(df_phn)):
-                begin = df_phn.iat[i,0]
-                end = df_phn.iat[i,1]
                 phn = df_phn.iat[i,2]
-                self.cache_label[i] = self.phn_dict[phn]
-                self.cache_centor[i] = (begin + end)//self.n_fft
+                begin = df_phn.iat[i,0]//(self.nperseg - self.noverlap)
+                end = df_phn.iat[i,1]//(self.nperseg - self.noverlap)
+                self.cache_label[begin:end] = self.phn_dict[phn]       
 
-            
-
-            self.cache_range = (cand.iat[0, 5],cand.iat[0, 4])
+            self.cache_range = (cand.iat[0, 4],cand.iat[0, 5])
         
-        frames = np.zeros(self.cache_spec.shape[:-1]+(self.n_frame,),dtype=self.cache_spec.dtype)
         local_idx = idx - self.cache_range[0]
-        centor = self.cache_centor[local_idx]
-        lower = centor - self.n_frame//2
-        upper = centor + (self.n_frame + 1)//2
-        lower_sc = max(0, lower)
-        upper_sc = min(self.cache_spec.shape[-1], upper)
-        lower_dst = lower_sc - lower
-        upper_dst = self.n_frame - (upper - upper_sc)
-
-        frames[...,lower_dst:upper_dst] = self.cache_spec[...,lower_sc:upper_sc]
-        label = self.cache_label[...,local_idx]
+        frames = self.cache_spec[...,local_idx:local_idx + self.nframe]
+        label = self.cache_label[local_idx + self.nframe//2]
 
         if self.frame_transform:
             frames = self.frame_transform(frames)
@@ -91,10 +87,7 @@ class Timit(Dataset):
             label = self.target_transform(label)
 
         return frames, label
-
-    def describe(self):
-        pass
-        
+      
 class TimitMetrics(Dataset):
     def __init__(self, root, annotations_file, phncode_file, data_dir):
         self.annotations = pd.read_csv(os.path.join(root, annotations_file))
@@ -131,7 +124,7 @@ class TimitMetrics(Dataset):
         return 0
 
 class TimitRow(Dataset):
-    def __init__(self, root, annotations_file, data_dir):
+    def __init__(self, root, annotations_file, data_dir, phn_info=None):
         df = pd.read_csv(os.path.join(root, annotations_file))
         df = df.sort_values('path_from_data_dir')
     
@@ -140,6 +133,13 @@ class TimitRow(Dataset):
 
         self.data_dir = os.path.join(root, data_dir)
 
+        if phn_info:
+            self.phn_dict,self.phn_list,self.phn_count = phn_info
+        else:
+            self.phn_dict = {}
+            self.phn_list = []
+            self.phn_count = 0
+
         self.annotations_new = []
 
     def __len__(self):
@@ -147,28 +147,26 @@ class TimitRow(Dataset):
 
     def __getitem__(self, idx):
         wav_path = os.path.join(self.data_dir, self.df_wav.iat[idx, 5])
-        sign, sr = sf.read(wav_path)
+        sign, _ = sf.read(wav_path)
 
         phn_path = os.path.join(self.data_dir, self.df_phn.iat[idx, 5])
         df = pd.read_csv(phn_path, delimiter=' ', header=None)
 
-        global phn_dict
-        global phn_list
-        global phn_count
+        labels = np.zeros(sign.shape[0], dtype=np.int64)
 
         for i in range(len(df)):
             phn = df.iat[i,2]
-            if not phn in phn_dict:
-                phn_dict[phn] = phn_count
-                phn_list.append(phn)
-                phn_count += 1
+            if not phn in self.phn_dict:
+                self.phn_dict[phn] = self.phn_count
+                self.phn_list.append(phn)
+                self.phn_count += 1
+            labels[df.iat[i,0]:df.iat[i,1]] = self.phn_dict[phn]
 
         self.annotations_new.append({'wav_path':self.df_wav.iat[idx, 5],
                                      'phn_path':self.df_phn.iat[idx, 5],
-                                     'length':len(df)})
-        
-            
-        return sign
+                                     'length':sign.shape[0]})
+                    
+        return sign,labels
 
 
 def main():
@@ -187,10 +185,13 @@ def main():
     for batch, (X,y) in enumerate(train_dataloader):
         print(f"processing train... batch = {batch}\r",end='')
 
-    print()
+    print("processing train... Done.")
+
 
     for batch, (X,y) in enumerate(test_dataloader):
         print(f"processing test... batch = {batch}\r",end='')
+
+    print("processing test... Done.")
 
 
 def create_annotations():
@@ -200,42 +201,48 @@ def create_annotations():
 
     path_self = os.path.dirname(os.path.abspath(__file__))
 
-    train_data = TimitRow(os.path.join(args.path, 'train_data.csv'),
-                          os.path.join(args.path, 'data/'))   
-    test_data = TimitRow(os.path.join(args.path, 'test_data.csv'),
-                         os.path.join(args.path, 'data/'))  
-
+    train_data = TimitRow(args.path,'train_data.csv','data/')
     train_dataloader = DataLoader(train_data, batch_size=1)
-    test_dataloader = DataLoader(test_data, batch_size=1)
 
     count = 0
-    
-    for sign in train_dataloader:
+    for _ in train_dataloader:
         print(f"processing train... count = {count}\r",end='')
         count += 1
 
     df = pd.DataFrame(train_data.annotations_new)
-    df['maxidx'] = df['length'].cumsum()
-    df['minidx'] = df['maxidx'].shift()
-    df.at[df.index[0],'minidx'] = 0
-    df['minidx'] = df['minidx'].astype(np.int64)
+    """
+        df['maxidx'] = df['length'].cumsum()
+        df['minidx'] = df['maxidx'].shift()
+        df.at[df.index[0],'minidx'] = 0
+        df['minidx'] = df['minidx'].astype(np.int64)
+    """
     df.to_csv(os.path.join(path_self, 'train_annotations.csv'))
 
-    print('\r',end='')
+    print("processing train... Done.")
 
-    for sign in test_dataloader:
+    phn_info = (train_data.phn_dict,train_data.phn_list,train_data.phn_count)
+
+    test_data = TimitRow(args.path,'test_data.csv','data/',phn_info=phn_info)
+    test_dataloader = DataLoader(test_data, batch_size=1)
+
+    count = 0
+    for _ in test_dataloader:
         print(f"processing test... count = {count}\r",end='')
         count += 1
 
     df = pd.DataFrame(test_data.annotations_new)
-    df['maxidx'] = df['length'].cumsum()
-    df['minidx'] = df['maxidx'].shift()
-    df.at[df.index[0],'minidx'] = 0
-    df['minidx'] = df['minidx'].astype(np.int64)
+    """
+        df['maxidx'] = df['length'].cumsum()
+        df['minidx'] = df['maxidx'].shift()
+        df.at[df.index[0],'minidx'] = 0
+        df['minidx'] = df['minidx'].astype(np.int64)
+    """
     df.to_csv(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'test_annotations.csv'))
 
+    print("processing train... Done.")
+
     with open("phn.pickle", "wb") as f:
-        pickle.dump((phn_dict,phn_list,phn_count), f)
+        pickle.dump((test_data.phn_dict,test_data.phn_list,test_data.phn_count), f)
 
 
 def metrics():
