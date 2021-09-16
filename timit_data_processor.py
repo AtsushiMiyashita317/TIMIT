@@ -256,21 +256,25 @@ class TimitRow(Dataset):
 
 class RandomFrameSamplar(BatchSampler):
     def __init__(self, maxidx, batchsize, cachesize):
-        self.maxidx = maxidx
-        self.minidx = np.zeros_like(maxidx, dtype=np.int64)
-        self.minidx[1:] = maxidx[:-1]
         self.datasize = np.max(maxidx)
+        self.filesize = maxidx.shape[0]
         self.rng = np.random.default_rng()
+
+        minidx = np.zeros_like(maxidx, dtype=np.int64)
+        minidx[1:] = maxidx[:-1]
+        length = maxidx - minidx
+        self.data_indices = np.full((self.filesize,length.max()),-1,dtype=np.int64)
+        for i in self.filesize:
+            self.data_indices[i,:length[i]] = np.arange(minidx[i],maxidx[i])
         
         self.cachesize = cachesize - 1
-        self.count = 0
         self.batchsize = batchsize
 
     def __iter__(self):
-        rng_idx = np.arange(self.maxidx.size)
-        self.rng.shuffle(rng_idx)
-        self.maxidx = self.maxidx[rng_idx]
-        self.minidx = self.minidx[rng_idx]
+        self.rng.shuffle(self.data_indices,axis=0)
+        self.rng.shuffle(self.data_indices,axis=1)
+        guide0 = np.arange(self.data_indices.shape[1])
+        guide1 = np.arange(self.data_indices.shape[1])
         arrs = []
         for i in range(self.cachesize):
             arr = np.arange(self.minidx[i],self.maxidx[i])
