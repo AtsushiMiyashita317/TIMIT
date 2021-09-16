@@ -3,6 +3,7 @@ import os
 import pickle
 
 import numpy as np
+from numpy.lib import delete
 from numpy.ma import indices
 import pandas as pd
 import soundfile as sf
@@ -18,13 +19,20 @@ class Timit(Dataset):
                  signal_transform=None, spec_transform=None, frame_transform=None, target_transform=None, 
                  datasize=None, cachesize = 100):
 
-        self.data_dir = os.path.join(root, data_dir)
         self.nperseg = nperseg
         if norverlap:
             self.noverlap = norverlap
         else:
             self.noverlap = nperseg//2
         self.nframe = nframe
+
+        self.data_dir = os.path.join(root, data_dir)
+        self.annotations = pd.read_csv(annotations_file)
+
+        sign_length = self.annotations['length'].values
+        spec_length = (sign_length+self.nperseg-self.noverlap-1)//(self.nperseg-self.noverlap) + 1
+        item_length = spec_length - self.nframe + 1
+        self.maxidx = np.cumsum(item_length)
 
         self.signal_transform = signal_transform
         self.spec_transform = spec_transform
@@ -34,22 +42,13 @@ class Timit(Dataset):
         self.cachesize = cachesize
         self.cache_spec = [np.empty(0)] * self.cachesize
         self.cache_label = [np.empty(0)] * self.cachesize
-        self.cache_range = [(0,0)] * self.cachesize
-        self.cache_last = np.full(cachesize,-1)
+        self.cache_lower = np.full(self.cachesize+1,self.maxidx.max()+1,dtype=np.int64)
+        self.cache_upper = np.full(self.cachesize+1,self.maxidx.max()+1,dtype=np.int64)
+        self.cache_last = np.full(cachesize,-1,dtype=np.int64)
+        self.cache_sorter = np.arange(cachesize+1)
         self.cache_time = 0
 
         self.datasize = datasize
-
-        self.annotations = pd.read_csv(annotations_file)
-
-        sign_length = self.annotations['length'].values
-        spec_length = (sign_length+self.nperseg-self.noverlap-1)//(self.nperseg-self.noverlap) + 1
-        item_length = spec_length - self.nframe + 1
-        maxidx = np.cumsum(item_length)
-        minidx = np.zeros_like(maxidx, dtype=np.int64)
-        minidx[1:] = maxidx[:-1]
-        self.annotations['minidx'] = minidx
-        self.annotations['maxidx'] = maxidx
 
         with open(phncode_file,'rb') as f:
             self.phn_dict,self.phn_list,self.phn_count = pickle.load(f)
@@ -59,22 +58,18 @@ class Timit(Dataset):
         if self.datasize:
             return self.datasize
         else:
-            return self.annotations['maxidx'].max()
+            return self.maxidx.max()
 
     def __getitem__(self, idx):
-        hit = -1
-        for i in range(self.cachesize):
-            if self.cache_range[i][0]<=idx and idx<self.cache_range[i][1]:
-                hit = i
-                self.cache_last[i] = self.cache_time
-                self.cache_time += 1
-                break
-        if hit < 0:
+        insert_idx = np.searchsorted(self.cache_upper,idx,sorter=self.cache_sorter,side='right')
+        hit = self.cache_sorter[insert_idx]
+        
+        if not (self.cache_lower[hit]<=idx and idx<self.cache_upper[hit]):
             oldest = np.argmin(self.cache_last)
 
-            cand = self.annotations[self.annotations['maxidx']>idx]
+            id = np.searchsorted(self.maxidx,idx,side='right')
             
-            wav_path = os.path.join(self.data_dir, cand.iat[0, 1])
+            wav_path = os.path.join(self.data_dir, self.annotations.iat[id, 1])
             sign, sr = sf.read(wav_path)
             if self.signal_transform:
                 sign = self.signal_transform(sign)    
@@ -86,7 +81,7 @@ class Timit(Dataset):
 
             self.cache_spec[oldest] = np.transpose(self.cache_spec[oldest])
 
-            phn_path = os.path.join(self.data_dir, cand.iat[0, 2])
+            phn_path = os.path.join(self.data_dir, self.annotations.iat[id, 2])
             df_phn = pd.read_csv(phn_path, delimiter=' ', header=None)
             self.cache_label[oldest] = np.zeros(self.cache_spec[oldest].shape[0], dtype=np.int64)
 
@@ -96,13 +91,28 @@ class Timit(Dataset):
                 end = df_phn.iat[i,1]//(self.nperseg - self.noverlap)
                 self.cache_label[oldest][begin:end] = self.phn_dict[phn]       
 
-            self.cache_range[oldest] = (cand.iat[0, 4],cand.iat[0, 5])
+            if id == 0:
+                self.cache_lower[oldest] = 0
+                self.cache_upper[oldest] = self.maxidx[0]
+            else:
+                self.cache_lower[oldest] = self.maxidx[id-1]
+                self.cache_upper[oldest] = self.maxidx[id]
+
 
             hit = oldest
             self.cache_last[oldest] = self.cache_time
-            self.cache_time += 1
 
-        local_idx = idx - self.cache_range[hit][0]
+            # get rank of oldest with respect to upper
+            delete_idx = np.where(self.cache_sorter==oldest)[0][0]
+            # update sorter
+            self.cache_sorter = np.delete(self.cache_sorter,delete_idx)
+            if delete_idx<insert_idx:
+                insert_idx -= 1
+            self.cache_sorter = np.insert(self.cache_sorter,insert_idx,oldest)
+
+        self.cache_time += 1
+
+        local_idx = idx - self.cache_lower[hit]
         frames = self.cache_spec[hit][local_idx:local_idx + self.nframe]
         label = self.cache_label[hit][local_idx + self.nframe//2]
 
