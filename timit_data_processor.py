@@ -35,7 +35,8 @@ class Timit(Dataset):
         self.cache_spec = [np.empty(0)] * self.cachesize
         self.cache_label = [np.empty(0)] * self.cachesize
         self.cache_range = [(0,0)] * self.cachesize
-        self.cache_oldest = 0
+        self.cache_last = np.full(cachesize,-1)
+        self.cache_time = 0
 
         self.datasize = datasize
 
@@ -65,8 +66,12 @@ class Timit(Dataset):
         for i in range(self.cachesize):
             if self.cache_range[i][0]<=idx and idx<self.cache_range[i][1]:
                 hit = i
+                self.cache_last[i] = self.cache_time
+                self.cache_time += 1
                 break
         if hit < 0:
+            oldest = np.argmin(self.cache_last)
+
             cand = self.annotations[self.annotations['maxidx']>idx]
             
             wav_path = os.path.join(self.data_dir, cand.iat[0, 1])
@@ -74,27 +79,28 @@ class Timit(Dataset):
             if self.signal_transform:
                 sign = self.signal_transform(sign)    
 
-            self.cache_spec[self.cache_oldest] = np.abs(signal.stft(sign,sr,nperseg=self.nperseg,noverlap=self.noverlap)[2])
+            self.cache_spec[oldest] = np.abs(signal.stft(sign,sr,nperseg=self.nperseg,noverlap=self.noverlap)[2])
 
             if self.spec_transform:
-                self.cache_spec[self.cache_oldest] = self.spec_transform(self.cache_spec[self.cache_oldest])    
+                self.cache_spec[oldest] = self.spec_transform(self.cache_spec[oldest])    
 
-            self.cache_spec[self.cache_oldest] = np.transpose(self.cache_spec[self.cache_oldest])
+            self.cache_spec[oldest] = np.transpose(self.cache_spec[oldest])
 
             phn_path = os.path.join(self.data_dir, cand.iat[0, 2])
             df_phn = pd.read_csv(phn_path, delimiter=' ', header=None)
-            self.cache_label[self.cache_oldest] = np.zeros(self.cache_spec[self.cache_oldest].shape[0], dtype=np.int64)
+            self.cache_label[oldest] = np.zeros(self.cache_spec[oldest].shape[0], dtype=np.int64)
 
             for i in range(len(df_phn)):
                 phn = df_phn.iat[i,2]
                 begin = df_phn.iat[i,0]//(self.nperseg - self.noverlap)
                 end = df_phn.iat[i,1]//(self.nperseg - self.noverlap)
-                self.cache_label[self.cache_oldest][begin:end] = self.phn_dict[phn]       
+                self.cache_label[oldest][begin:end] = self.phn_dict[phn]       
 
-            self.cache_range[self.cache_oldest] = (cand.iat[0, 4],cand.iat[0, 5])
+            self.cache_range[oldest] = (cand.iat[0, 4],cand.iat[0, 5])
 
-            hit = self.cache_oldest
-            self.cache_oldest = (self.cache_oldest + 1) % self.cachesize
+            hit = oldest
+            self.cache_last[oldest] = self.cache_time
+            self.cache_time += 1
 
         local_idx = idx - self.cache_range[hit][0]
         frames = self.cache_spec[hit][local_idx:local_idx + self.nframe]
@@ -248,7 +254,7 @@ class RandomFrameSamplar(BatchSampler):
         self.datasize = np.max(maxidx)
         self.rng = np.random.default_rng()
         
-        self.cachesize = cachesize
+        self.cachesize = cachesize - 1
         self.count = 0
         self.batchsize = batchsize
 
@@ -257,15 +263,32 @@ class RandomFrameSamplar(BatchSampler):
         self.rng.shuffle(rng_idx)
         self.maxidx = self.maxidx[rng_idx]
         self.minidx = self.minidx[rng_idx]
-        res = np.array([])
-        for i in range(self.maxidx.size//self.cachesize):
-            arrs = [np.arange(self.minidx[i*self.cachesize+j],self.maxidx[i*self.cachesize+j]) for j in range(self.cachesize)]
-            indices = np.concatenate(arrs)
+        arrs = []
+        for i in range(self.cachesize):
+            arr = np.arange(self.minidx[i],self.maxidx[i])
+            self.rng.shuffle(arr)
+            arrs.append(arr)
+
+        res = np.array([],dtype=np.int64)
+        for i in range(self.maxidx.size):
+            indices = np.array([],dtype=np.int64)
+            for j in range(self.cachesize):
+                k = (j-i)%self.cachesize
+                begin = (k*arrs[j].size)//self.cachesize
+                end = ((k+1)*arrs[j].size)//self.cachesize
+                arr = arrs[j][begin:end]
+                indices = np.concatenate([indices,arr])
             self.rng.shuffle(indices)
+            indices = np.concatenate([res,indices])
             for j in range(0,indices.size,self.batchsize):
                 res = indices[j:j+self.batchsize]
                 if res.size == self.batchsize:
                     yield res
+            k = (i+self.cachesize)%self.maxidx.size
+            arr = np.arange(self.minidx[k],self.maxidx[k])
+            self.rng.shuffle(arr)
+            arrs[i%self.cachesize] = arr
+
 
     def __len__(self):
         return self.maxidx.size//self.cachesize
