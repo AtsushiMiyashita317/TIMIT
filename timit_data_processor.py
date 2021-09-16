@@ -258,52 +258,44 @@ class RandomFrameSamplar(BatchSampler):
     def __init__(self, maxidx, batchsize, cachesize):
         self.datasize = np.max(maxidx)
         self.filesize = maxidx.shape[0]
+        self.cachesize = cachesize - 1
+        self.batchsize = batchsize
         self.rng = np.random.default_rng()
 
         minidx = np.zeros_like(maxidx, dtype=np.int64)
         minidx[1:] = maxidx[:-1]
         length = maxidx - minidx
-        self.data_indices = np.full((self.filesize,length.max()),-1,dtype=np.int64)
-        for i in self.filesize:
+        self.bandsize = (length.max()+self.cachesize-1)//self.cachesize
+        self.data_indices = np.full((self.filesize,self.bandsize*self.cachesize),-1,dtype=np.int64)
+        for i in range(self.filesize):
             self.data_indices[i,:length[i]] = np.arange(minidx[i],maxidx[i])
         
-        self.cachesize = cachesize - 1
-        self.batchsize = batchsize
-
     def __iter__(self):
         self.rng.shuffle(self.data_indices,axis=0)
         self.rng.shuffle(self.data_indices,axis=1)
-        guide0 = np.arange(self.data_indices.shape[1])
-        guide1 = np.arange(self.data_indices.shape[1])
-        arrs = []
-        for i in range(self.cachesize):
-            arr = np.arange(self.minidx[i],self.maxidx[i])
-            self.rng.shuffle(arr)
-            arrs.append(arr)
+        guide0 = np.arange(self.cachesize)[:,np.newaxis]
+        guide0 = np.broadcast_to(guide0,(self.cachesize,self.bandsize))
+        guide0 = np.reshape(guide0,self.cachesize*self.bandsize)
+        guide1 = np.arange(self.cachesize*self.bandsize)
 
         res = np.array([],dtype=np.int64)
-        for i in range(self.maxidx.size):
-            indices = np.array([],dtype=np.int64)
-            for j in range(self.cachesize):
-                k = (j-i)%self.cachesize
-                begin = (k*arrs[j].size)//self.cachesize
-                end = ((k+1)*arrs[j].size)//self.cachesize
-                arr = arrs[j][begin:end]
-                indices = np.concatenate([indices,arr])
+        for _ in range(self.filesize):
+            guide0 = guide0//self.filesize
+
+            indices = self.data_indices[guide0,guide1]
+            indices = indices[indices>=0]
             self.rng.shuffle(indices)
             indices = np.concatenate([res,indices])
+
             for j in range(0,indices.size,self.batchsize):
                 res = indices[j:j+self.batchsize]
                 if res.size == self.batchsize:
                     yield res
-            k = (i+self.cachesize)%self.maxidx.size
-            arr = np.arange(self.minidx[k],self.maxidx[k])
-            self.rng.shuffle(arr)
-            arrs[i%self.cachesize] = arr
 
-
+            guide0 += 1
+            
     def __len__(self):
-        return self.maxidx.max()//self.batchsize
+        return self.datasize//self.batchsize
 
 def main():
     parser = argparse.ArgumentParser(description="test class FramedTimit")
