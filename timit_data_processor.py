@@ -3,8 +3,6 @@ import os
 import pickle
 
 import numpy as np
-from numpy.lib import delete
-from numpy.ma import indices
 import pandas as pd
 import soundfile as sf
 from scipy import signal
@@ -109,7 +107,7 @@ class Timit(Dataset):
             if delete_idx<insert_idx:
                 insert_idx -= 1
             self.cache_sorter = np.insert(self.cache_sorter,insert_idx,oldest)
-
+        
         self.cache_time += 1
 
         local_idx = idx - self.cache_lower[hit]
@@ -301,7 +299,7 @@ class RandomFrameSamplar(BatchSampler):
 
 
     def __len__(self):
-        return self.maxidx.size//self.cachesize
+        return self.maxidx.max()//self.batchsize
 
 def main():
     parser = argparse.ArgumentParser(description="test class FramedTimit")
